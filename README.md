@@ -11,10 +11,16 @@ Files     : ice1801_primary.lib   the model (subcircuit ICE1801LM, primary + sec
             eval_board/           EVAL_100W1_ZVS_180LM board netlist (validation work in progress)
             progress_notes.md     development log: datasheet references, assumptions, bugs found
 
-This is an unofficial, behavioural model built from the public datasheet (ICE1 100LM series, R1.0,
-2026-06-22). It is not provided or endorsed by Infineon. It reproduces the control behaviour of the
-IC, not the transistor-level circuit. Use it for design-in and system-level simulation, not as a
-guarantee of real hardware behaviour.
+*** THIS IS NOT AN OFFICIAL INFINEON MODEL AND HAS NOT BEEN VALIDATED OR APPROVED BY INFINEON. ***
+It is an independent, unofficial, behavioural model built from the public datasheet (ICE1 100LM
+series, R1.0, 2026-06-22) and the public EVAL_100W1_ZVS_180LM engineering report. It is not provided,
+reviewed, supported or endorsed by Infineon Technologies AG. Infineon, CoolSET and CoolSiC are
+trademarks of their owner and are named here only to identify the part being modelled.
+
+The model reproduces the control behaviour of the IC, not its transistor-level circuit. Use it for
+design-in and system-level simulation only. It is provided as is, without warranty, and its results
+are no guarantee of real hardware behaviour: always verify a design on hardware and against the
+official Infineon datasheet.
 
 
 1. INSTALLATION
