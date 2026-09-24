@@ -3,7 +3,7 @@
 ![Status](https://img.shields.io/badge/status-needs--validation-blue)
 
 
-ICE1801LM - Behavioural SPICE model of the Infineon ICE180LM CoolSET SiP flyback controller
+ICE180LM - Behavioural SPICE model of the Infineon ICE180LM CoolSET SiP flyback controller
 =========================================================================================
 
 Simulator : LTspice (developed and tested with LTspice 24.0.12). Uses LTspice-specific syntax
