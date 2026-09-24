@@ -12,6 +12,7 @@ Files     : ice1801_primary.lib   the model (subcircuit ICE1801LM, primary + sec
             progress_notes.md     development log: datasheet references, assumptions, bugs found
 
 *** THIS IS NOT AN OFFICIAL INFINEON MODEL AND HAS NOT BEEN VALIDATED OR APPROVED BY INFINEON. ***
+
 It is an independent, unofficial, behavioural model built from the public datasheet (ICE1 100LM
 series, R1.0, 2026-06-22) and the public EVAL_100W1_ZVS_180LM engineering report. It is not provided,
 reviewed, supported or endorsed by Infineon Technologies AG. Infineon, CoolSET and CoolSiC are
