@@ -1,3 +1,8 @@
+![Version](https://img.shields.io/badge/version-0.1-white)
+[![License](https://img.shields.io/badge/license-Apache--2.0-red.svg)](LICENSE)
+![Status](https://img.shields.io/badge/status-needs--validation-blue)
+
+
 ICE1801LM - Behavioural SPICE model of the Infineon ICE180LM CoolSET SiP flyback controller
 =========================================================================================
 
