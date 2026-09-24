@@ -1,0 +1,707 @@
+﻿* SPICE Model for ICE1801 Flyback control IC 
+*
+*
+* Created by SuBardagi
+* 17-09-2026
+*
+****************************************************************
+* This model is for simulation purposes only.                  *
+* Check the README.txt for libray details                      *
+****************************************************************
+*
+
+.subckt ICE1801LM DRAIN HV VCCP GNDP ZCDP VINP ENP CS GNDS GDSR ZCDS VCCS FB EA CONF0 CONF1
+
+* ==== Primary Side ==
+
+* ==== VCCP power management ====
+    .param VVCCPon     = 20.0
+    .param VVCCPoff    = 12.0
+    .param VVCCPstart  = 1.8
+    .param IChg1       = 0.78m
+    .param IChg2       = 5.0m
+    .param VVCCP_OVP   = 30.4
+    .param R_OVP       = 86.6k
+    .param C_OVP       = 1n
+
+* ----- HV Startup-cell (two-step charge current into VCCP)
+    * The cell draws its current from the HV pin (through the external RHV) and needs ~2 V of headroom (ASSUMPTION: knee value).
+    BIchg HV VCCP I=if(V(EN_VCCP)>2.5, 0, if(V(VCCP)<VVCCPstart, IChg1, IChg2)*limit((V(HV)-V(VCCP)-1)/2,0,1))
+
+* ----- Raw UVLO hysteresis (native SW device, Vt=16V/Vh=4V -> on 20V/off 12V)
+    .model UVLOSW SW(Ron=1 Roff=1Meg Vt=16 Vh=4)
+    Vdig  ENSRC GNDP 5
+    Rpd   EN_VCCP GNDP 1k
+    S1    EN_VCCP ENSRC VCCP GNDP UVLOSW
+
+* ----- VCCP OVP comparator, ~60us blanking
+    BovpRaw OVP_RAW GNDP V=if(V(VCCP)>VVCCP_OVP, 5, 0)
+    R_ovpb  OVP_RAW OVP_FILT {R_OVP}
+    C_ovpb  OVP_FILT GNDP {C_OVP}
+    BovpOut RESET_OVP GNDP V=if(V(OVP_FILT)>2.5, 5, 0)
+
+* ==== HV pin brown-out sense ====
+    .param tDCHVsmt = 20u
+    .param tDCHVsmperiod = 1000u
+    .param NHVBO = 4 
+
+
+* ==== Generic Window Comparator ====
+    .subckt WINCMP IN GND OUT PARAMS: VMIN=0 VMAX=1
+        BwinCmp OUT GND V=if(V(IN)>=VMIN & V(IN)<=VMAX, 5, 0)
+    .ends WINCMP
+    * ----- R_ZCDPL config readout on the real ZCDP pin (p.10, p.18 Table 4, p.28 Table 13) -----
+    * During the configuration-loading window a sense current is injected into ZCDP; the resulting voltage across the external
+    * RZCDPL is sampled at the end of the window and decoded. ASSUMPTIONS (datasheet silent): tCFG (window length), the integrated
+    * RZCDP value, and ISENSE_ZCDPL. ISENSE_ZCDPL must exceed VZCDP_short(max)/1.00k = 130 uA or option 1 (1.00 kohm) would trip the
+    * short-to-GNDP check, so 50 uA is impossible; 200 uA used.
+    .param ISENSE_ZCDPL = 200u
+    .param tCFG = 100u
+    .param RZCDP_int = 1Meg
+    .param VZCDP_short = 100m
+    .param C_cfg = 1n
+    .param I_cfg = {C_cfg*2.5/tCFG}
+
+    * ----- Config window: starts when VCCP passes VVCCPon (EN_VCCP), lasts tCFG, cleared by UVLO -----
+    CCfgTmr CFG_TMR GNDP {C_cfg}
+    BCfgChg GNDP CFG_TMR I=if(V(EN_VCCP)>2.5, I_cfg*limit((4.6-V(CFG_TMR))/0.2,0,1), 0)
+    .model CFGRSTSW SW(Ron=1 Roff=1G Vt=-2.5 Vh=0.1)
+    SCfgRst CFG_TMR GNDP GNDP EN_VCCP CFGRSTSW
+    BCfgActive CFG_ACTIVE GNDP V=if(V(EN_VCCP)>2.5 & V(CFG_TMR)<2.5, 5, 0)
+    BCfgDone   CFG_DONE   GNDP V=if(V(EN_VCCP)>2.5 & V(CFG_TMR)>2.5, 5, 0)
+
+    * ----- Sense current into ZCDP, integrated pull-down, sample-and-hold of V(ZCDP) -----
+    BIsenseZcdp GNDP ZCDP I=if(V(CFG_ACTIVE)>2.5, ISENSE_ZCDPL, 0)
+    Rzcdp_int ZCDP GNDP {RZCDP_int}
+    CCfgHold CFG_HOLD GNDP 1n
+    BCfgTrack GNDP CFG_HOLD I=if(V(CFG_ACTIVE)>2.5, 100m*(V(ZCDP)-V(CFG_HOLD)), 0)
+
+    * ----- Window comparators on the measured resistance (1 V = 1 kohm; windows are the Table 4 RZCDPL ranges) -----
+    BRzcdplMeas RZCDPL_MEAS GNDP V=V(CFG_HOLD)/ISENSE_ZCDPL*1e-3
+    X_opt1 RZCDPL_MEAS GNDP MATCH1 WINCMP PARAMS: VMIN=1.00 VMAX=1.05
+    X_opt2 RZCDPL_MEAS GNDP MATCH2 WINCMP PARAMS: VMIN=1.87 VMAX=2.70
+    X_opt3 RZCDPL_MEAS GNDP MATCH3 WINCMP PARAMS: VMIN=4.30 VMAX=5.00
+    X_opt4 RZCDPL_MEAS GNDP MATCH4 WINCMP PARAMS: VMIN=9.20 VMAX=9.50
+
+    * ----- ZCDP short to GNDP (p.10, p.18 sec 3.4.1.12): checked only during config loading, then disabled -----
+    BZcdpShort ZCDP_SHORT_FAULT GNDP V=if(V(CFG_DONE)>2.5 & V(CFG_HOLD)<VZCDP_short, 5, 0)
+
+    * ----- Selection logic
+    BihvBI    IHV_BI_sig   GNDP V=if(V(MATCH1)>2.5, 2.00m, if(V(MATCH2)>2.5, 1.00m, if(V(MATCH3)>2.5, 0.67m, if(V(MATCH4)>2.5, 0.50m, 0))))
+    BihvBO    IHV_BO_sig   GNDP V=if(V(MATCH1)>2.5, 1.40m, if(V(MATCH2)>2.5, 0.70m, if(V(MATCH3)>2.5, 0.47m, if(V(MATCH4)>2.5, 0.35m, 0))))
+    BrhvSh    RHVshunt_sig GNDP V=if(V(MATCH1)>2.5, 0.50k, if(V(MATCH2)>2.5, 1.00k, if(V(MATCH3)>2.5, 1.50k, if(V(MATCH4)>2.5, 2.00k, 0))))
+
+    BcfgFault CONFIG_FAULT GNDP V=if(V(CFG_DONE)>2.5 & V(MATCH1)<2.5 & V(MATCH2)<2.5 & V(MATCH3)<2.5 & V(MATCH4)<2.5, 5, 0)
+    BbiThrV BI_THR GNDP V=V(IHV_BI_sig) * V(RHVshunt_sig)
+    BboThrV BO_THR GNDP V=V(IHV_BO_sig) * V(RHVshunt_sig)
+
+    * ----- Sample clock 
+    Vsampclk SAMPCLK GNDP PULSE(0 5 0 10n 10n {tDCHVsmt} {tDCHVsmperiod})
+    BsampGate SAMPGATE GNDP V=if(V(SAMPCLK)>2.5 & V(EN_VCCP)>2.5 & V(CFG_DONE)>2.5, 5, 0)
+
+    * ----- HV shunt switch
+    .model HVSW SW(Ron=1 Roff=1Meg Vt=2.5 Vh=0.1)
+        Sshunt HV HVSHUNT SAMPGATE GNDP HVSW
+        Rshunt HVSHUNT GNDP R=max(V(RHVshunt_sig),1)   ; floor: signal is 0 before the config is decoded and R=0 is singular
+        Rleakhv HV GNDP 80Meg 
+
+    * ----- brown-in
+    CbiHold BI_HOLD GNDP 1n
+    BbiChg GNDP BI_HOLD I=if(V(SAMPGATE)>2.5 & V(HVSHUNT)>V(BI_THR), 10m*limit((4.6-V(BI_HOLD))/0.2,0,1), 0)
+    BbiDis GNDP BI_HOLD I=if(V(SAMPGATE)>2.5 & V(HVSHUNT)<V(BI_THR), -10m*limit((V(BI_HOLD)-0.5+0.03)/0.06,0,1), 0)
+    BbiOk BI_OK GNDP V=if(V(BI_HOLD)>2.5, 5, 0)
+
+    * ----- brown-out
+    BboEvt BO_EVT GNDP V=if(V(SAMPGATE)>2.5 & V(HVSHUNT)<V(BO_THR), 5, 0)
+    CboCnt BO_CNT GNDP 1n
+    BcntChg GNDP BO_CNT I=if(V(BO_EVT)>2.5, 35u*limit((4.1-V(BO_CNT))/0.2,0,1), 0)
+    BcntDis GNDP BO_CNT I=if(V(SAMPGATE)>2.5 & V(BO_EVT)<2.5, -10m*limit((V(BO_CNT)-0.1+0.03)/0.06,0,1), 0)
+    BboFault BO_FAULT GNDP V=if(V(BO_CNT)>2.5, 5, 0)
+
+* ==== CS pin current sense ====
+* ----- OCP1 -----
+    .param VCSOCP1 = 0.76
+    .param tOCP1LEB = 220n
+    .param ICSpullup = 1u
+
+    Bcspullup GNDP CS I={ICSpullup}
+
+
+    .param R_LEB = 3.18k
+    .param C_LEB = 100p
+    Rleb GATE LEB_RC {R_LEB}
+    Cleb LEB_RC GNDP {C_LEB}
+
+    .model LEBRESET SW(Ron = 1 Roff = 1Meg Vt = -2.5 Vh = 0.1)
+    Sleb LEB_RC GNDP GNDP GATE LEBRESET
+
+    BlebActive LEB_ACTIVE GNDP V=if(V(GATE)>2.5 & V(LEB_RC)<2.5, 5, 0)
+
+    BocpTrip1 OCP1_TRIP GNDP V=if(V(GATE)>2.5 & V(LEB_ACTIVE)<2.5 & V(CS)>VCSOCP1, 5, 0)
+
+* ----- OCP2 -----
+    .param VCSOCP2 = 1.1
+    .param tOCP2LEB = 40n
+    .param NOCP2max = 3
+
+    .param R_LEB2 = 577 
+    .param C_LEB2 = 100p
+
+    Rleb2 GATE LEB2_RC {R_LEB2}
+    Cleb2 LEB2_RC GNDP {C_LEB2}
+    Sleb2 LEB2_RC GNDP GNDP GATE LEBRESET
+    BlebActive2 LEB2_ACTIVE GNDP V=if(V(GATE)>2.5 & V(LEB2_RC)<2.5, 5, 0)
+
+    BocpEvt2 OCP2_EVT GNDP V=if(V(GATE)>2.5 & V(LEB2_ACTIVE)<2.5 & V(CS)>VCSOCP2, 5, 0)
+
+    .model LATCHRESET SW(Ron = 1 Roff = 1Meg Vt = 2.5 Vh = 0.1)
+    Cocp2Latch OCP2_LATCH GNDP 1n
+    BOcp2Set GNDP OCP2_LATCH I=if(V(OCP2_EVT)>2.5, 10m*limit((4.6-V(OCP2_LATCH))/0.2,0,1), 0)
+    SOcp2LatchRst OCP2_LATCH GNDP LEB_ACTIVE GNDP LATCHRESET
+
+    .param R_FALL = 2.89k
+    .param C_FALL = 100p
+    BnGate NGATE GNDP V=5-V(GATE)
+    Rfall NGATE FALL_RC {R_FALL}
+    Cfall FALL_RC GNDP {C_FALL}
+    Sfall FALL_RC GNDP GNDP NGATE LEBRESET
+    BfallActive FALL_ACTIVE GNDP V=if(V(NGATE)>2.5 & V(FALL_RC)<2.5, 5, 0)
+
+    COcp2Cnt OCP2_CNT GNDP 1n 
+    BCntSetp GNDP OCP2_CNT I=if(V(FALL_ACTIVE)>2.5 & V(OCP2_LATCH)>2.5, 5m*limit((4.6-V(OCP2_CNT))/0.2,0,1), 0)
+    BCntRst GNDP OCP2_CNT I=if(V(FALL_ACTIVE)>2.5 & V(OCP2_LATCH)<2.5, -50m*limit((V(OCP2_CNT)-0.05+0.03)/0.06,0,1), 0)
+
+    BOcp2Fault OCP2_FAULT GNDP V=if(V(OCP2_CNT)>2.5, 5, 0)
+
+* ==== Primary ZCD ==== 
+    .param VZCDPthr = 100m
+    .param VZCDPRS = 0.3
+    .param tZCDPrs = 2000n
+    .param tZCDPrs_ss = 25.0u 
+    .param C_rs = 100p
+    .param R_rs = 28.9k
+    .param R_rs_SS = 360.7k
+
+* ----- Track and hold -----
+    .model TRACKSW SW(Ron = 1 Roff = 1Meg Vt = 2.5 Vh = 0.1)
+    Strk ZCD_ATEDGE ZCDP GATE GNDP TRACKSW
+    Chold ZCD_ATEDGE GNDP 1n
+
+* ----- Ring supression -----
+    Rrs NGATE RS_RC R=if(V(SS_RAMP)<1 | V(ZCD_ATEDGE)<VZCDPRS, R_rs_SS, R_rs)
+    Crs RS_RC GNDP {C_rs}
+    Srs RS_RC GNDP GNDP NGATE LEBRESET
+    BRsActive RS_ACTIVE GNDP V=if(V(NGATE)>2.5 & V(RS_RC)<2.5, 5, 0)
+
+* ----- Zero-cross detector -----
+    BZcdRaw ZCD_RAW GNDP V=if(V(ZCDP)<VZCDPthr, 5, 0)
+    BZcdEvent ZCD_EVENT GNDP V=if(V(ZCD_RAW)>2.5 & V(RS_ACTIVE)<2.5 & V(GATE)<2.5, 5, 0)
+
+* ==== Primary OVP ====
+    .param VZCDP_OVP = 2.2
+    .param NZCDPovp = 3 
+
+    BOvpevt OVP_EVT GNDP V=if(V(GATE)<2.5 & V(RS_ACTIVE)<2.5 & V(ZCDP)>VZCDP_OVP, 5, 0)
+
+    COvpLatch OVP_LATCH GNDP 1n
+    BOvpSet GNDP OVP_LATCH I=if(V(OVP_EVT)>2.5, 10m*limit((4.6-V(OVP_LATCH))/0.2,0,1), 0)
+    SOvpLatchRst OVP_LATCH GNDP FALL_ACTIVE GNDP LATCHRESET
+    
+    COvpCnt OVP_CNT GNDP 1n 
+    BOvpCntStep GNDP OVP_CNT I=if(V(LEB_ACTIVE)>2.5 & V(OVP_LATCH)>2.5 & V(OVP_CNT)<4.5, 5m , 0)
+    BOvpCntRst GNDP OVP_CNT I=if(V(LEB_ACTIVE)>2.5 & V(OVP_LATCH)<2.5, -50m*limit((V(OVP_CNT)-0.05+0.03)/0.06,0,1), 0)
+
+    BzcdpOvpFault ZCDP_FAULT GNDP V=if(V(OVP_CNT)>2.5 & V(SEC_CLOSED_LOOP_RX)<2.5, 5, 0)
+
+
+* ==== Primary UVP ====
+
+    .param VZCDP_UVP = 0.5
+    .param NZCDPuvp = 3
+
+    BUvpEvt UVP_EVT GNDP V=if(V(GATE)<2.5 & V(RS_ACTIVE)<2.5 & V(ZCDP)<VZCDP_UVP, 5, 0)
+
+    CUvpLatch UVP_LATCH GNDP 1n 
+    BUvpSet GNDP UVP_LATCH I=if(V(UVP_EVT)>2.5, 10m*limit((4.6-V(UVP_LATCH))/0.2,0,1), 0)
+    SUvpLatchRst UVP_LATCH GNDP FALL_ACTIVE GNDP LATCHRESET
+
+    CUvpCnt UVP_CNT GNDP 1n 
+    BUvpCntStep GNDP UVP_CNT I=if(V(LEB_ACTIVE)>2.5 & V(UVP_LATCH)>2.5, 5m*limit((4.6-V(UVP_CNT))/0.2,0,1), 0)
+    BUvpCntRst GNDP UVP_CNT I=if(V(LEB_ACTIVE)>2.5 & V(UVP_LATCH)<2.5, -50m*limit((V(UVP_CNT)-0.05+0.03)/0.06,0,1), 0)
+
+    BzcdpUcpFault ZCDP_UVP_FAULT GNDP V=if(V(UVP_CNT)>2.5 & V(SEC_CLOSED_LOOP_RX)<2.5 & V(SS_RAMP)>=4, 5, 0)
+
+* ==== VINP OVP ====
+    .param VVINP_LOVP = 2.8
+    .param tVINP_LOVP = 250u
+    .param R_VINPB = 360.7k
+    .param C_VINPB = 1n 
+
+    BVinOvpRaw VINP_OVP_RAW GNDP V=if(V(VINP)>VVINP_LOVP, 5, 0)
+    R_vinpb VINP_OVP_RAW VINP_OVP_FILT {R_VINPB}
+    C_vinpb VINP_OVP_FILT GNDP {C_VINPB}
+    BvinpOvpOut VINP_LOVP_FAULT GNDP V=if(V(VINP_OVP_FILT)>2.5, 5, 0)
+
+* ==== GATE DRIVER (BASIC) ====
+    CGateMem GATE_MEM GNDP 1n
+    *BGateSet GNDP GATE_MEM I=if(V(ZCD_EVENT)>2.5 & V(EN_VCCP)>2.5 & V(BI_OK)>2.5 & V(GATE_MEM)<4.5, 5m, 0)
+    .model GATESW SW(Ron=1 Roff=1Meg Vt=2.5 Vh=0.5)
+    Vdig_gate GATE_DIGSRC GNDP 5
+    Rpd_gate GATE GNDP 1k
+    Sgate GATE GATE_DIGSRC GATE_MEM GNDP GATESW 
+
+* ==== Integrated power switch (CoolSiC, ICE180xx) ====
+    * Table 16 p.29: RDS(on) 0.083 ohm typ (TJ=25 C, ID=2.8 A), Coer 60 pF (energy-related effective output capacitance).
+    * ASSUMPTIONS: Coss is modelled as this constant effective value (the real one is strongly voltage dependent); body diode
+    * parameters are generic (SiC, Vf ~3 V), not from the datasheet.
+    .model MAINSW SW(Ron=0.083 Roff=100Meg Vt=2.5 Vh=0.5)
+    .model DSICBODY D(Is=1e-16 N=1.1 Rs=0.1)
+    Smain DRAIN CS GATE GNDP MAINSW
+    Coss_main DRAIN CS 60p
+    Dbody_main CS DRAIN DSICBODY
+
+* ==== Soft-Start Control ====
+    .param tSS = 12m
+    .param tSS_S = 3m 
+    .param VSS1 = 0.3
+    .param VSS_Stp = 0.15
+
+    CSsRamp SS_RAMP GNDP 1n
+    BSsRampChg GNDP SS_RAMP I=if(V(EN_VCCP)>2.5, 0.333u*limit((4.6-V(SS_RAMP))/0.2,0,1), 0)
+    BSsRampDis GNDP SS_RAMP I=if(V(EN_VCCP)<2.5, -50m*limit((V(SS_RAMP)-0.05+0.03)/0.06,0,1), 0)
+    BSsTarget SS_TARGET GNDP V=if(V(SS_RAMP)<1, VSS1, if(V(SS_RAMP)<2, VSS1+VSS_Stp, if(V(SS_RAMP)<3, VSS1+2*VSS_Stp, if(V(SS_RAMP)<4, VSS1+3*VSS_Stp, VCSOCP1))))
+    BSsTrip SS_TRIP GNDP V=if(V(GATE)>2.5 & V(LEB_ACTIVE)<2.5 & V(CS)>V(SS_TARGET), 5, 0)
+
+    *BGateRst GNDP GATE_MEM I=if((V(OCP1_TRIP)>2.5 | V(SS_TRIP)>2.5) & V(GATE_MEM)>0.05, -50m, 0)
+
+* ==== Soft-start max on-time / max off-time (open-loop audible-noise limits) ====
+    .param tOnMax  = 35.0u   ; typ, Table 12 p.27
+    .param tOffMax = 42.5u   ; typ, Table 12 p.27
+    .param R_onmax = 505.05k
+    .param C_onmax = 100p
+    .param R_offmax = 613.3k
+    .param C_offmax = 100p
+
+    Ronmax GATE ONMAX_RC {R_onmax}
+    Conmax ONMAX_RC GNDP {C_onmax}
+    Sonmax ONMAX_RC GNDP GNDP GATE LEBRESET
+    BOnMaxTrip ONMAX_TRIP GNDP V=if(V(GATE)>2.5 & V(ONMAX_RC)>2.5 & V(SEC_CLOSED_LOOP_RX)<2.5, 5, 0)
+
+    Roffmax NGATE OFFMAX_RC {R_offmax}
+    Coffmax OFFMAX_RC GNDP {C_offmax}
+    Soffmax OFFMAX_RC GNDP GNDP NGATE LEBRESET
+    BOffMaxTrip OFFMAX_TRIP GNDP V=if(V(NGATE)>2.5 & V(OFFMAX_RC)>2.5 & V(SS_RAMP)<1, 5, 0)
+
+* ==== ENP ====
+    .param VENP_H = 10   ; typ, Table 15 p.29 (drives the external VINP divider switch)
+    BEnp ENP GNDP V=if(V(EN_VCCP)>2.5 & V(PROTECTION_TRIG)<2.5 & V(HM_SLEEP_RX)<2.5, VENP_H, 0)
+
+* ==== OTP ====
+    .param TJPOTP = 140
+    .param TJPOTP_hys = 40
+    .param tJPOTP_blank = 48m   ; renamed: SPICE names are case-insensitive, tJPOTP collided with TJPOTP (140 C)
+    .param R_OTPB = 69.3Meg
+    .param C_OTPB = 1n
+
+    .model OTPSW SW(Ron=1 Roff=1Meg Vt=120 Vh=20)
+    Vdig_otp OTP_DIGSRC GNDP 5
+    Rpd_otp OTP_TRIP_RAW GNDP 1k
+    Sotp OTP_TRIP_RAW OTP_DIGSRC TJ GNDP OTPSW
+
+    R_otpb OTP_TRIP_RAW OTP_FILT {R_OTPB}
+    C_otpb OTP_FILT GNDP {C_OTPB}
+    BotpOut OTP_FAULT GNDP V=if(V(OTP_FILT)>2.5, 5, 0)
+    
+* ==== Primary close-loop timeout protection ====
+    .param tpto = 40m   ; typ, Table 12 p.27
+    .param R_clt = 57.72Meg
+    .param C_clt = 1n
+
+    Rclt EN_VCCP CLT_RC {R_clt}
+    Cclt CLT_RC GNDP {C_clt}
+    Sclt CLT_RC GNDP GNDP EN_VCCP LEBRESET
+    BCltTimeout CLT_TIMEOUT GNDP V=if(V(EN_VCCP)>2.5 & V(CLT_RC)>2.5, 5, 0)
+    BCltFault CLT_FAULT GNDP V=if(V(CLT_TIMEOUT)>2.5 & V(SEC_CLOSED_LOOP_RX)<2.5, 5, 0)
+
+* ==== Auto-Restart ====
+    BProtTriggered PROTECTION_TRIG GNDP V=if(V(OCP2_FAULT)>2.5 | V(ZCDP_FAULT)>2.5 | V(ZCDP_UVP_FAULT)>2.5 | V(VINP_LOVP_FAULT)>2.5 | V(OTP_FAULT)>2.5 | V(BO_FAULT)>2.5 | V(RESET_OVP)>2.5 | V(CLT_FAULT)>2.5 | V(ZCDP_SHORT_FAULT)>2.5, 5, 0)
+
+    BGateSet GNDP GATE_MEM I=if((V(ZCD_EVENT)>2.5 | V(OFFMAX_TRIP)>2.5) & V(EN_VCCP)>2.5 & V(BI_OK)>2.5 & V(PROTECTION_TRIG)<2.5 & V(SEC_TAKEOVER_RX)<2.5 & V(SEC_CLOSED_LOOP_RX)<2.5, 5m*limit((4.6-V(GATE_MEM))/0.2,0,1), 0)
+    BGateSetCt GNDP GATE_MEM I=if(V(CT_ON_RX)>2.5 & V(SEC_CLOSED_LOOP_RX)>2.5 & V(EN_VCCP)>2.5 & V(BI_OK)>2.5 & V(PROTECTION_TRIG)<2.5, 100m*limit((4.6-V(GATE_MEM))/0.2,0,1), 0)
+    BGateRst GNDP GATE_MEM I=if((V(OCP1_TRIP)>2.5 | V(SS_TRIP)>2.5 | V(PROTECTION_TRIG)>2.5 | V(ONMAX_TRIP)>2.5 | V(SEC_TAKEOVER_RX)>2.5 | (V(CT_OFF_RX)>2.5 & V(SEC_CLOSED_LOOP_RX)>2.5)), -50m*limit((V(GATE_MEM)-0.05+0.03)/0.06,0,1), 0)
+
+    .param R_RST = 2.89k 
+    .param C_RST = 100p
+    R_reset EN_VCCP RESTART_RC {R_RST}
+    C_reset RESTART_RC GNDP {C_RST}
+    Sreset RESTART_RC GNDP GNDP EN_VCCP LEBRESET
+    BRestartActive RESTART_ACTIVE GNDP V=if(V(EN_VCCP)>2.5 & V(RESTART_RC)<2.5, 5, 0)
+
+    BEightSkipFault EIGHTSKIP_FAULT GNDP V=if(V(OCP2_FAULT)>2.5 | V(ZCDP_FAULT)>2.5 | V(ZCDP_UVP_FAULT)>2.5 | V(CLT_FAULT)>2.5, 5, 0)
+
+    CSkipCnt SKIP_CNT GNDP 1n 
+    BSkipCntStep GNDP SKIP_CNT I=if(V(RESTART_ACTIVE)>2.5 & V(EIGHTSKIP_FAULT)>2.5, 2.5m*limit((4.6-V(SKIP_CNT))/0.2,0,1), 0)
+    BSkipCntRst GNDP SKIP_CNT I=if(V(EIGHTSKIP_FAULT)<2.5, -50m*limit((V(SKIP_CNT)-0.05+0.03)/0.06,0,1), 0)
+    BSkipAllowed SKIP_ALLOWED GNDP V=if(V(SKIP_CNT)>3.75, 5, 0)
+
+    BOCP2forceReset GNDP OCP2_CNT I=if(V(RESTART_ACTIVE)>2.5 & V(SKIP_ALLOWED)>2.5, -50m*limit((V(OCP2_CNT)-0.05+0.03)/0.06,0,1), 0)
+    BOVPforceReset GNDP OVP_CNT I=if(V(RESTART_ACTIVE)>2.5 & V(SKIP_ALLOWED)>2.5, -50m*limit((V(OVP_CNT)-0.05+0.03)/0.06,0,1), 0)
+    BUVPforceReset GNDP UVP_CNT I=if(V(RESTART_ACTIVE)>2.5 & V(SKIP_ALLOWED)>2.5, -50m*limit((V(UVP_CNT)-0.05+0.03)/0.06,0,1), 0)
+
+* ==== Secondary Side ====
+
+* ==== VCCS power management 
+    .param VVCCSon = 5.7 
+    .param VVCCSres = 0.7
+    .param VVCCSoff = 5.0
+    .param VVCCS_UVP = 7
+    .param tVCCS_UVP_B = 40u
+    .param VVCCS_OVP = 24
+    .param tVCCS_OVP_B = 40u
+
+* ----- UVLO control -----
+    .model VCCSUVLOSW SW(Ron=1 Roff=1Meg Vt=5.35 Vh=0.35)
+    Vdig_vccs EN_VCCS_SRC GNDS 5
+    Rpd_vccs EN_VCCS GNDS 1k
+    S_vccs EN_VCCS EN_VCCS_SRC VCCS GNDS VCCSUVLOSW
+
+    .param R_VCCSUVPB = 57.72k
+    .param C_VCCSUVPB = 1n
+    BVccsUvpRaw VCCS_UVP_RAW GNDS V=if(V(VCCS)<VVCCS_UVP, 5, 0)
+    R_vccsuvpb VCCS_UVP_RAW VCCS_UVP_FILT {R_VCCSUVPB}
+    C_vccsuvpb VCCS_UVP_FILT GNDS {C_VCCSUVPB}
+    BVccsUvpOut VCCS_UVP_FAULT GNDS V=if(V(VCCS_UVP_FILT)>2.5, 5, 0)
+
+* ----- OVP Control -----
+    .param R_VCCSOVPB = 57.72k
+    .param C_VCCSOVPB = 1n
+    BVccsovpRaw VCCS_OVP_RAW GNDS V=if(V(VCCS)>VVCCS_OVP, 5, 0)
+    R_vccsovpb VCCS_OVP_RAW VCCS_OVP_FILT {R_VCCSOVPB}
+    C_vccsovpb VCCS_OVP_FILT GNDS {C_VCCSOVPB}
+    BVccsOvpOut VCCS_OVP_FAULT GNDS V=if(V(VCCS_OVP_FILT)>2.5, 5, 0)
+
+* ==== FB Amplifier ====
+
+    .param VFBref = 1.2
+    .param VFBstart = 1.14
+    .param Gm_EA = 100u
+
+    .param VEA_maxclamp = 2.3
+
+    BFBStartOk FB_OK GNDS V=if(V(FB)>VFBStart, 5, 0)
+    BEAgm GNDS EA I=if(V(FB)<VFBref & V(EA)<VEA_maxclamp, Gm_EA*(VFBref-V(FB)), if(V(FB)>VFBref & V(EA)>0.01, Gm_EA*(VFBref-V(FB)), 0))
+
+* ==== Open-loop protection ====
+    .param VEA_OLP = 2.3
+    .param tEA_OLP_B = 20m
+    .param R_EAOLPB = 28.86Meg
+    .param C_EAOLPB = 1n
+
+    BEaOlpRaw EA_OLP_RAW GNDS V=if(V(EA)>VEA_OLP, 5, 0)
+    R_eaolpb EA_OLP_RAW EA_OLP_FILT {R_EAOLPB}
+    C_eaolpb EA_OLP_FILT GNDS {C_EAOLPB}
+    BEaOlpOut EA_OLP_FAULT GNDS V=if(V(EA_OLP_FILT)>2.5, 5, 0)
+
+    .param VNSN = 100m
+    .param VZCDS_SROFFslow = -4m
+    .param R_srpulse = 2.89k
+    .param C_srpulse = 100p
+
+    BSrOnRaw SR_ON_RAW GNDS V=if(V(ZCDS)<VNSN, 5, 0)
+    Rsron SR_ON_RAW SR_ON_PULSE_RC {R_srpulse}
+    Csron SR_ON_PULSE_RC GNDS {C_srpulse}
+    Ssron SR_ON_PULSE_RC GNDS GNDS SR_ON_RAW LEBRESET
+    BSrOnPulse SR_ON_PULSE GNDS V=if(V(SR_ON_RAW)>2.5 & V(SR_ON_PULSE_RC)<2.5, 5, 0)
+
+    BSrOffRaw SR_OFF_RAW GNDS V=if(V(ZCDS)>VZCDS_SROFFslow, 5, 0)
+    Rsroff SR_OFF_RAW SR_OFF_PULSE_RC {R_srpulse}
+    Csroff SR_OFF_PULSE_RC GNDS {C_srpulse}
+    Ssroff SR_OFF_PULSE_RC GNDS GNDS SR_OFF_RAW LEBRESET
+    BSrOffPulse SR_OFF_PULSE GNDS V=if(V(SR_OFF_RAW)>2.5 & V(SR_OFF_PULSE_RC)<2.5, 5, 0)
+
+    CSrMem SR_MEM GNDS 1n
+    BSrSet GNDS SR_MEM I=if(V(SR_ON_PULSE)>2.5, 50m*limit((4.6-V(SR_MEM))/0.2,0,1), 0)
+    BSrRst GNDS SR_MEM I=if((V(SR_OFF_PULSE)>2.5 | V(ML_PULSE)>2.5), -50m*limit((V(SR_MEM)-0.05+0.03)/0.06,0,1), 0)
+
+    .model SRSW SW(Ron=1 Roff=1Meg Vt=2.5 Vh=0.5)
+    Vdig_sr SR_DIGSRC GNDS 5 
+    Rpd_sr SR_ON GNDS 1K 
+    S_sr SR_ON SR_DIGSRC SR_MEM GNDS SRSW
+
+* ==== GDSR gate driver ====
+
+    .param VEA_skip = 0.50   ; typ, Table 19 p.32
+    BSkipMode SKIP_MODE GNDS V=if(V(EA)<VEA_skip, 5, 0)
+    .param VGDSRclmp = 10      
+    .param ton_GDSR   = 630n   
+    .param R_gdsrmin  = 9.09k
+    .param C_gdsrmin  = 100p
+
+    Rgdsrmin SR_ON GDSR_MIN_RC {R_gdsrmin}
+    Cgdsrmin GDSR_MIN_RC GNDS {C_gdsrmin}
+    Sgdsrmin GDSR_MIN_RC GNDS GNDS SR_ON LEBRESET
+    BGdsrMinActive GDSR_MIN_ACTIVE GNDS V=if(V(SR_ON)>2.5 & V(GDSR_MIN_RC)<2.5, 5, 0)
+    BGdsrOnExt GDSR_ON_EXT GNDS V=if((V(SR_ON)>2.5 | V(GDSR_MIN_ACTIVE)>2.5) & V(SKIP_MODE)<2.5 & V(HM_ACTIVE)<2.5, 5, 0)
+
+* ----- Gate driver output stage -----
+    .model GDSRSW SW(Ron=1 Roff=1Meg Vt=2.5 Vh=0.5)
+    Vdig_gdsr GDSR_DIGSRC GNDS {VGDSRclmp}
+    Rpd_gdsr GDSR GNDS 1k
+    S_gdsr GDSR GDSR_DIGSRC GDSR_ON_EXT GNDS GDSRSW
+
+* ==== CONF0/CONF1 configuration decode ====
+    .param ICONFx = 50u   
+
+* ----- RSET0: turns ratio NMAIN/NSEC -----
+    Isense0 GNDS CONF0 {ICONFx}
+    X_rset0_opt1 CONF0 GNDS MATCH0_1 WINCMP PARAMS: VMIN=193.05m VMAX=196.95m 
+    X_rset0_opt2 CONF0 GNDS MATCH0_2 WINCMP PARAMS: VMIN=336.6m  VMAX=343.4m  
+    X_rset0_opt3 CONF0 GNDS MATCH0_3 WINCMP PARAMS: VMIN=594m    VMAX=606m    
+    X_rset0_opt4 CONF0 GNDS MATCH0_4 WINCMP PARAMS: VMIN=891m    VMAX=909m    
+    X_rset0_opt5 CONF0 GNDS MATCH0_5 WINCMP PARAMS: VMIN=1.3365  VMAX=1.3635  
+    X_rset0_opt6 CONF0 GNDS MATCH0_6 WINCMP PARAMS: VMIN=1.9305  VMAX=1.9695  
+
+    BTurnsRatio NMAIN_NSEC GNDS V=if(V(MATCH0_1)>2.5, 5, if(V(MATCH0_2)>2.5, 6, if(V(MATCH0_3)>2.5, 7, if(V(MATCH0_4)>2.5, 8, if(V(MATCH0_5)>2.5, 9, if(V(MATCH0_6)>2.5, 10, 0))))))
+    BConf0Fault CONF0_FAULT GNDS V=if(V(MATCH0_1)<2.5 & V(MATCH0_2)<2.5 & V(MATCH0_3)<2.5 & V(MATCH0_4)<2.5 & V(MATCH0_5)<2.5 & V(MATCH0_6)<2.5, 5, 0)
+
+* ----- RSET1: parameter set -----
+    Isense1 GNDS CONF1 {ICONFx}
+    X_rset1_opt1 CONF1 GNDS MATCH1_1 WINCMP PARAMS: VMIN=193.05m VMAX=196.95m 
+    X_rset1_opt2 CONF1 GNDS MATCH1_2 WINCMP PARAMS: VMIN=336.6m  VMAX=343.4m  
+    X_rset1_opt3 CONF1 GNDS MATCH1_3 WINCMP PARAMS: VMIN=594m    VMAX=606m    
+    X_rset1_opt4 CONF1 GNDS MATCH1_4 WINCMP PARAMS: VMIN=891m    VMAX=909m    
+    X_rset1_opt5 CONF1 GNDS MATCH1_5 WINCMP PARAMS: VMIN=1.3365  VMAX=1.3635  
+    X_rset1_opt6 CONF1 GNDS MATCH1_6 WINCMP PARAMS: VMIN=1.9305  VMAX=1.9695  
+
+    BVeaHMOn  VEA_HMOn_sig  GNDS V=if(V(MATCH1_1)>2.5, 1.25, if(V(MATCH1_2)>2.5, 1.20, if(V(MATCH1_3)>2.5, 1.10, if(V(MATCH1_4)>2.5, 1.25, if(V(MATCH1_5)>2.5, 1.20, if(V(MATCH1_6)>2.5, 1.10, 0))))))
+    BVeaHMOff VEA_HMOff_sig GNDS V=if(V(MATCH1_1)>2.5, 0.95, if(V(MATCH1_2)>2.5, 0.9, if(V(MATCH1_3)>2.5, 0.8, if(V(MATCH1_4)>2.5, 0.95, if(V(MATCH1_5)>2.5, 0.9, if(V(MATCH1_6)>2.5, 0.8, 0))))))
+    BVeaLHM   VEA_LHM_sig   GNDS V=if(V(MATCH1_1)>2.5, 1.4, if(V(MATCH1_2)>2.5, 1.4, if(V(MATCH1_3)>2.5, 1.4, if(V(MATCH1_4)>2.5, 1.6, if(V(MATCH1_5)>2.5, 1.6, if(V(MATCH1_6)>2.5, 1.6, 0))))))
+    BConf1Fault CONF1_FAULT GNDS V=if(V(MATCH1_1)<2.5 & V(MATCH1_2)<2.5 & V(MATCH1_3)<2.5 & V(MATCH1_4)<2.5 & V(MATCH1_5)<2.5 & V(MATCH1_6)<2.5, 5, 0)
+
+    .param VEA_EHM = 0.643
+    .param VEA_PWM_HM = 1.0
+    .param Nvalley_min_highline = 3
+    .param Nvalley_min_lowline  = 1
+    .param Nvalley_max_highline = 10
+    .param Nvalley_max_lowline  = 8
+
+* ==== Secondary take-over of control ====
+    .param tho = 100u
+    .param R_tho = 144.3k
+    .param C_tho = 1n
+    BSecReady SEC_READY GNDS V=if(V(EN_VCCS)>2.5 & V(FB_OK)>2.5, 5, 0)
+
+    BSecTakeoverReq SEC_TAKEOVER_REQ GNDS V=if(V(SEC_READY)>2.5, 5, 0)
+
+    Rho SEC_READY THO_RC {R_tho}
+    Cho THO_RC GNDS {C_tho}
+    Stho THO_RC GNDS GNDS SEC_READY LEBRESET
+    BSecClosedLoop SEC_CLOSED_LOOP GNDS V=if(V(SEC_READY)>2.5 & V(THO_RC)>2.5, 5, 0)
+
+* ==== QR Control ==== 
+    .param VEA_LHC = 1
+    .param VEA_HLC = 1.2
+    .param VEA_R = 1.8
+    .param tvalleyupdate = 48m
+
+    VvalleyClk VALLEY_CLK GNDS PULSE(0 5 0 10n 10n 10u {tvalleyupdate})
+    BValleyGate VALLEY_CLK_GATE GNDS V=if(V(VALLEY_CLK)>2.5 & V(EN_VCCS)>2.5, 5, 0)
+    
+    BNValleyMin NVALLEY_MIN GNDS V=if(V(LINE_HIGH)>2.5, Nvalley_min_highline, Nvalley_min_lowline)
+    BNValleyMax NVALLEY_MAX GNDS V=if(V(LINE_HIGH)>2.5, Nvalley_max_highline, Nvalley_max_lowline)
+
+    CTargetValley TARGET_VALLEY GNDS 1n
+    BTargetUp GNDS TARGET_VALLEY I=if(V(VALLEY_CLK_GATE)>2.5 & V(HM_ACTIVE)<2.5 & V(EA)<VEA_LHC & V(TARGET_VALLEY)<V(NVALLEY_MAX), 100u, 0)
+    BTargetDown GNDS TARGET_VALLEY I=if(V(VALLEY_CLK_GATE)>2.5 & V(HM_ACTIVE)<2.5 & V(EA)>VEA_HLC & V(EA)<VEA_R & V(TARGET_VALLEY)>V(NVALLEY_MIN), -100u, 0)
+    BTargetInit GNDS TARGET_VALLEY I=if(V(EN_VCCS)<2.5, 1m*(V(NVALLEY_MIN)-V(TARGET_VALLEY)), 0)   ; startup: lowest valley while the secondary is off (p.12)
+    BTargetHM GNDS TARGET_VALLEY I=if(V(HM_ACTIVE)>2.5 & V(EA)<VEA_R & V(TARGET_VALLEY)<V(NVALLEY_MAX), 10m, 0)   ; fixed at max in HM, stays there on exit (p.14)
+    BTargetJump GNDS TARGET_VALLEY I=if(V(EA)>VEA_R & V(TARGET_VALLEY)>V(NVALLEY_MIN), -50m, 0)
+    
+* ==== QR control: frequency limits (fsw_min floor, fsw_max ceiling) ====
+    .param fsw_min = 25k     
+    .param tSwMax = 40u      
+    .param I_swmax = 62.5u
+    .param fsw_max = 150k    
+    .param tSwMin = 6.67u    
+
+    CSwMaxTimer SWMAX_RC GNDS 1n
+    BSwMaxChg GNDS SWMAX_RC I=if(V(SWMAX_RC)<4.5, {I_swmax}, 0)
+    BSwMaxRst GNDS SWMAX_RC I=if(V(MATCH_LATCH)>0.3, -50m*limit((V(SWMAX_RC)-0.05+0.03)/0.06,0,1), 0)
+    .model FSWTMOSW SW(Ron=1 Roff=1Meg Vt=1.5 Vh=1.0)   ; trips >2.5V, releases <0.5V
+    Vdig_fswtmo FSWTMO_SRC GNDS 5
+    Rpd_fswtmo FSW_MIN_TIMEOUT GNDS 1k
+    Sfswtmo FSW_MIN_TIMEOUT FSWTMO_SRC SWMAX_RC GNDS FSWTMOSW
+
+    .param tCCMperiod = 40u
+    .model CCMTMOSW SW(Ron=1 Roff=1Meg Vt={2.5*tCCMperiod/tSwMax-1.0} Vh=1.0)
+    Vdig_ccmtmo CCMTMO_SRC GNDS 5
+    Rpd_ccmtmo CCM_TIMEOUT GNDS 1k
+    Sccmtmo CCM_TIMEOUT CCMTMO_SRC SWMAX_RC GNDS CCMTMOSW
+
+    CFswMaxBlock FSWMAX_BLOCK GNDS 1n
+    BFswMaxBlockSet GNDS FSWMAX_BLOCK I=if(V(ML_PULSE)>2.5, 500m*limit((4.6-V(FSWMAX_BLOCK))/0.2,0,1), 0)
+    Rfswleak FSWMAX_BLOCK GNDS 11.35k
+    BFswMaxActive FSWMAX_ACTIVE GNDS V=if(V(FSWMAX_BLOCK)>2.5, 5, 0)
+
+
+* ==== QR control: valley counting ====
+    CValleyCnt VALLEY_CNT GNDS 1n
+    BValleyCntStep GNDS VALLEY_CNT I=if(V(SR_ON_PULSE)>2.5, 5m*limit((20.25-V(VALLEY_CNT))/0.5,0,1), 0)
+    BValleyMatch VALLEY_MATCH GNDS V=if(V(VALLEY_CNT)>V(TARGET_VALLEY)-0.5 & V(VALLEY_CNT)<V(TARGET_VALLEY)+0.5, 5, 0)
+    CMatchLatch MATCH_LATCH GNDS 1n
+    BMatchLatchSet GNDS MATCH_LATCH I=if((V(VALLEY_MATCH)>2.5 | V(FSW_MIN_TIMEOUT)>2.5 | V(CCM_TIMEOUT)>2.5) & (V(FSWMAX_ACTIVE)<2.5 | V(MATCH_LATCH)>0.3), 500m*limit((4.6-V(MATCH_LATCH))/0.2,0,1), 0)
+    Rmlleak MATCH_LATCH GNDS 340
+    BMLPulse ML_PULSE GNDS V=if(V(MATCH_LATCH)>2.5, 5, 0)
+    .model MLRSTSW SW(Ron=1 Roff=1Meg Vt=2.15 Vh=1.85)   ; on >4.0V, off <0.3V
+    Vdig_mlrst MLRST_SRC GNDS 5
+    Rpd_mlrst ML_RST_EN GNDS 1k
+    Sml_rst ML_RST_EN MLRST_SRC MATCH_LATCH GNDS MLRSTSW
+    BValleyCntRst GNDS VALLEY_CNT I=if(V(ML_RST_EN)>2.5, -50m*limit((V(VALLEY_CNT)-0.05+0.03)/0.06,0,1), 0)
+
+
+* ==== Frequency jitter ====
+    .param fJITper = 4k
+    .param dfJITamp = 0.04
+    Vjittri JIT_TRI GNDS PULSE(-1 1 0 {0.5/fJITper-1n} {0.5/fJITper-1n} 2n {1/fJITper})
+    BJitMod JIT_MOD GNDS V=if(V(SEC_CLOSED_LOOP)>2.5 & V(HM_ACTIVE)<2.5, 1+dfJITamp*V(JIT_TRI), 1)
+
+* ==== PWM on-time generator (secondary, closed loop) ====
+    .param VPWM_lclamp = 0.40
+    .param VPWM_hclamp = 2.1
+    .param tONmin_CL = 336n
+    .param tOnMax_CL = 35u
+    .param IZCDS_mid = 1.99m
+    .param Iton = 100u
+    .param Kton = 1e5          ; ramp slope in V/s = Iton / 1n
+
+    * ----- ZCDS clamp to VCCS while the primary pulse is on; IZCDS measured through it -----
+    .model ZCLMPSW SW(Ron=10 Roff=1G Vt=2.5 Vh=0.5)
+    Sclamp ZCDS VCCS TON_ACTIVE GNDS ZCLMPSW
+    CIffHold IFF_HOLD GNDS 1n
+    BIffTrack GNDS IFF_HOLD I=if(V(TON_ACTIVE)>2.5, 100m*(-1000*I(Sclamp)-V(IFF_HOLD)), 0)   ; LTspice reports switch current with negative sign here; 1 V = 1 mA; tracks in pulse, holds after
+
+    * ----- On-time target: ramp threshold = Kton * ton(EA, IZCDS) -----
+    BEaEff EA_EFF GNDS V=if(V(HM_ACTIVE)>2.5, VEA_PWM_HM, V(EA))   ; hysteretic mode pulses use a fixed EA level (p.14)
+    BTonTh TON_TH GNDS V=Kton*min(max((tONmin_CL+(min(max(V(EA_EFF),VPWM_lclamp),VPWM_hclamp)-VPWM_lclamp)/(VPWM_hclamp-VPWM_lclamp)*(tOnMax_CL-tONmin_CL))*min(max(IZCDS_mid/max(V(IFF_HOLD)*1m,10u),0.25),4)*V(JIT_MOD),tONmin_CL),tOnMax_CL)
+
+    * ----- Pulse latch: set by the ON request, reset when the ramp passes the target (persists until empty) -----
+    CTonMem TON_MEM GNDS 1n
+    BTonSet GNDS TON_MEM I=if(V(CT_TX_ON,GNDS)>2.5, 100m*limit((4.6-V(TON_MEM))/0.2,0,1), 0)
+    BTonRst GNDS TON_MEM I=if((V(TON_TRIP)>2.5 | V(SEC_CLOSED_LOOP)<2.5), -20m*limit((V(TON_MEM)-0.01+0.03)/0.06,0,1), 0)
+    .model TONSW SW(Ron=1 Roff=1Meg Vt=2.5 Vh=0.5)
+    Vdig_ton TON_DIGSRC GNDS 5
+    Rpd_ton TON_ACTIVE GNDS 1k
+    Sonact TON_ACTIVE TON_DIGSRC TON_MEM GNDS TONSW
+
+    * ----- Linear ramp timer; held until the latch is empty so the trip cannot cancel its own reset -----
+    CTonRamp TON_RAMP GNDS 1n
+    BTonChg GNDS TON_RAMP I=if(V(TON_ACTIVE)>2.5, Iton*limit((4.6-V(TON_RAMP))/0.2,0,1), 0)
+    .model TONEMPTYSW SW(Ron=1 Roff=1G Vt=-0.2 Vh=0.1)   ; conducts while V(TON_MEM) < 0.1, releases > 0.3
+    Stonempty TON_RAMP GNDS GNDS TON_MEM TONEMPTYSW
+    BTonTrip TON_TRIP GNDS V=if(V(TON_RAMP)>V(TON_TH), 5, 0)
+    BPwmOff PWM_OFF_REQ GNDS V=if(V(TON_TRIP)>2.5, 5, 0)
+
+* ==== Line detection (LINE_HIGH) ====
+    .param dIZCDS_mid = 269u
+    .param tZCDS_mid = 16m
+    .param C_lnmid = 100n
+    .param I_lnmid = {C_lnmid*4/tZCDS_mid}
+    .model LNRSTSW SW(Ron=1 Roff=1G Vt=-2.5 Vh=0.1)
+
+    BLnHiCond LN_HI_COND GNDS V=if(V(IFF_HOLD)*1m>IZCDS_mid, 5, 0)
+    BLnLoCond LN_LO_COND GNDS V=if(V(IFF_HOLD)*1m<IZCDS_mid-dIZCDS_mid, 5, 0)
+
+    CLnHiTmr LN_HI_TMR GNDS {C_lnmid}
+    BLnHiChg GNDS LN_HI_TMR I=if(V(LN_HI_COND)>2.5, I_lnmid*limit((4.6-V(LN_HI_TMR))/0.2,0,1), 0)
+    SLnHiRst LN_HI_TMR GNDS GNDS LN_HI_COND LNRSTSW
+    BLnHiTrip LN_HI_TRIP GNDS V=if(V(LN_HI_TMR)>4, 5, 0)
+
+    CLnLoTmr LN_LO_TMR GNDS {C_lnmid}
+    BLnLoChg GNDS LN_LO_TMR I=if(V(LN_LO_COND)>2.5, I_lnmid*limit((4.6-V(LN_LO_TMR))/0.2,0,1), 0)
+    SLnLoRst LN_LO_TMR GNDS GNDS LN_LO_COND LNRSTSW
+    BLnLoTrip LN_LO_TRIP GNDS V=if(V(LN_LO_TMR)>4, 5, 0)
+
+    CLnMem LN_MEM GNDS 1n
+    BLnSet GNDS LN_MEM I=if(V(LN_HI_TRIP)>2.5, 5m*limit((4.6-V(LN_MEM))/0.2,0,1), 0)
+    BLnRst GNDS LN_MEM I=if(V(LN_LO_TRIP)>2.5, -5m*limit((V(LN_MEM)-0.05+0.03)/0.06,0,1), 0)
+    BLineHigh LINE_HIGH GNDS V=if(V(LN_MEM)>2.5, 5, 0)
+
+* ==== Hysteretic mode (HM) ====
+    .param tHM = 20m
+    .param C_hm = 100n
+    .param I_hm = {C_hm*4/tHM}
+    .model HMRSTSW SW(Ron=1 Roff=1G Vt=-2.5 Vh=0.1)
+
+    BHmEntryCond HM_ENTRY_COND GNDS V=if(V(EA)<VEA_EHM & V(TARGET_VALLEY)>V(NVALLEY_MAX)-0.5 & V(SEC_CLOSED_LOOP)>2.5, 5, 0)
+    CHmTmr HM_TMR GNDS {C_hm}
+    BHmChg GNDS HM_TMR I=if(V(HM_ENTRY_COND)>2.5, I_hm*limit((4.6-V(HM_TMR))/0.2,0,1), 0)
+    SHmRst HM_TMR GNDS GNDS HM_ENTRY_COND HMRSTSW
+    BHmEntryTrip HM_ENTRY_TRIP GNDS V=if(V(HM_TMR)>4, 5, 0)
+
+    CHmMem HM_MEM GNDS 1n
+    BHmSet GNDS HM_MEM I=if(V(HM_ENTRY_TRIP)>2.5, 5m*limit((4.6-V(HM_MEM))/0.2,0,1), 0)
+    BHmExit HM_EXIT GNDS V=if(V(EA)>V(VEA_LHM_sig) | V(SEC_CLOSED_LOOP)<2.5, 5, 0)
+    BHmRst GNDS HM_MEM I=if(V(HM_EXIT)>2.5, -5m*limit((V(HM_MEM)-0.05+0.03)/0.06,0,1), 0)
+    BHmActive HM_ACTIVE GNDS V=if(V(HM_MEM)>2.5, 5, 0)
+
+    CHmBurst HM_BURST_MEM GNDS 1n
+    BHmBurstSet GNDS HM_BURST_MEM I=if(V(HM_ACTIVE)>2.5 & V(EA)>V(VEA_HMOn_sig), 5m*limit((4.6-V(HM_BURST_MEM))/0.2,0,1), 0)
+    BHmBurstRst GNDS HM_BURST_MEM I=if((V(EA)<V(VEA_HMOff_sig) | V(HM_ACTIVE)<2.5), -5m*limit((V(HM_BURST_MEM)-0.05+0.03)/0.06,0,1), 0)
+    BHmBurst HM_BURST GNDS V=if(V(HM_BURST_MEM)>2.5, 5, 0)
+
+* ==== CT-Link (secondary -> primary coreless transformer, behavioural) ====
+
+    .param tCT = 50n
+    .param R_ctd = 1k
+    .param C_ctd = {tCT/0.693/R_ctd}
+    * --- TX side (GNDS) ---
+    BCtTxStop CT_TX_STOP GNDS V=if(V(SEC_TAKEOVER_REQ,GNDS)>2.5 & V(SEC_CLOSED_LOOP,GNDS)<2.5, 5, 0)
+    BCtTxCl   CT_TX_CL   GNDS V=if(V(SEC_CLOSED_LOOP,GNDS)>2.5, 5, 0)
+    BCtTxOn   CT_TX_ON   GNDS V=if(V(ML_PULSE,GNDS)>2.5 & V(SEC_CLOSED_LOOP,GNDS)>2.5 & V(SKIP_MODE,GNDS)<2.5 & (V(HM_ACTIVE,GNDS)<2.5 | V(HM_BURST,GNDS)>2.5), 5, 0)
+    BCtTxSlp  CT_TX_HMSLEEP GNDS V=if(V(HM_ACTIVE,GNDS)>2.5 & V(HM_BURST,GNDS)<2.5, 5, 0)
+    BCtTxOff  CT_TX_OFF  GNDS V=if(V(PWM_OFF_REQ,GNDS)>2.5, 5, 0)
+    * --- RX side (GNDP) ---
+    BCtRxRawStop CT_STOP_RAW GNDP V=if(V(CT_TX_STOP,GNDS)>2.5, 5, 0)
+    RCtdStop CT_STOP_RAW CT_STOP_F {R_ctd}
+    CCtdStop CT_STOP_F GNDP {C_ctd}
+    BCtRxStop SEC_TAKEOVER_RX GNDP V=if(V(CT_STOP_F)>2.5, 5, 0)
+    BCtRxRawCl CT_CL_RAW GNDP V=if(V(CT_TX_CL,GNDS)>2.5, 5, 0)
+    RCtdCl CT_CL_RAW CT_CL_F {R_ctd}
+    CCtdCl CT_CL_F GNDP {C_ctd}
+    BCtRxCl SEC_CLOSED_LOOP_RX GNDP V=if(V(CT_CL_F)>2.5, 5, 0)
+    BCtRxRawOn CT_ON_RAW GNDP V=if(V(CT_TX_ON,GNDS)>2.5, 5, 0)
+    RCtdOn CT_ON_RAW CT_ON_F {R_ctd}
+    CCtdOn CT_ON_F GNDP {C_ctd}
+    BCtRxOn CT_ON_RX GNDP V=if(V(CT_ON_F)>2.5, 5, 0)
+    BCtRxRawSlp CT_SLP_RAW GNDP V=if(V(CT_TX_HMSLEEP,GNDS)>2.5, 5, 0)
+    RCtdSlp CT_SLP_RAW CT_SLP_F {R_ctd}
+    CCtdSlp CT_SLP_F GNDP {C_ctd}
+    BCtRxSlp HM_SLEEP_RX GNDP V=if(V(CT_SLP_F)>2.5, 5, 0)
+    BCtRxRawOff CT_OFF_RAW GNDP V=if(V(CT_TX_OFF,GNDS)>2.5, 5, 0)
+    RCtdOff CT_OFF_RAW CT_OFF_F {R_ctd}
+    CCtdOff CT_OFF_F GNDP {C_ctd}
+    BCtRxOff CT_OFF_RX GNDP V=if(V(CT_OFF_F)>2.5, 5, 0)
+
+* ==== DC paths for capacitor-only nodes (integrated memory / timer / hold nodes) ====
+    Vtj_amb TJ_AMB GNDP 25
+    Rtj_amb TJ TJ_AMB 1Meg
+    Rdc_bi_hold BI_HOLD GNDP 100G
+    Rdc_bo_cnt BO_CNT GNDP 100G
+    Rdc_cfg_hold CFG_HOLD GNDP 100G
+    Rdc_gate_mem GATE_MEM GNDP 100G
+    Rdc_ocp2_cnt OCP2_CNT GNDP 100G
+    Rdc_ovp_cnt OVP_CNT GNDP 100G
+    Rdc_uvp_cnt UVP_CNT GNDP 100G
+    Rdc_skip_cnt SKIP_CNT GNDP 100G
+    Rdc_ss_ramp SS_RAMP GNDP 100G
+    Rdc_hm_burst_mem HM_BURST_MEM GNDS 100G
+    Rdc_hm_mem HM_MEM GNDS 100G
+    Rdc_iff_hold IFF_HOLD GNDS 100G
+    Rdc_ln_mem LN_MEM GNDS 100G
+    Rdc_sr_mem SR_MEM GNDS 100G
+    Rdc_swmax_rc SWMAX_RC GNDS 100G
+    Rdc_target_valley TARGET_VALLEY GNDS 100G
+    Rdc_ton_mem TON_MEM GNDS 100G
+    Rdc_valley_cnt VALLEY_CNT GNDS 100G
+
+.ends ICE1801LM
