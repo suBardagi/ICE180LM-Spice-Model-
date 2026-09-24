@@ -152,12 +152,5 @@ Link     : behavioural CT-Link (secondary to primary): take-over stop, closed-lo
 - Every assumption is flagged in the library comments and in progress_notes.md.
 
 
-9. TO DO BEFORE COMMERCIAL DISTRIBUTION
----------------------------------------
-- Complete the eval-board comparison and publish the results with the model.
-- Replace the absolute ModelFile path in the symbol.
-- Decide the licence and add it here; check Infineon's terms for use of the part name and datasheet content.
-- Add the model version and change log below.
-
 Version : 0.1 (development)
 Author  : SuBardagi (library header)
