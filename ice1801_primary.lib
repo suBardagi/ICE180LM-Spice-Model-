@@ -184,7 +184,11 @@
 
 * ----- Track and hold -----
     .model TRACKSW SW(Ron = 1 Roff = 1Meg Vt = 2.5 Vh = 0.1)
-    Strk ZCD_ATEDGE ZCDP GATE GNDP TRACKSW
+    * Sample ZCDP during the ring-suppression window (demag plateau), not during the on-time: with D3 blocking the aux
+    * winding, ZCDP is ~0 V during the on-time. Buffered so the 1 nF hold cap does not load the ZCDP pin.
+    * ASSUMPTION: the datasheet's "VZCDP at turn-off" is read as the plateau right after turn-off.
+    BZcdBuf ZCDP_BUF GNDP V=V(ZCDP)
+    Strk ZCD_ATEDGE ZCDP_BUF RS_ACTIVE GNDP TRACKSW
     Chold ZCD_ATEDGE GNDP 1n
 
 * ----- Ring supression -----
@@ -219,7 +223,7 @@
     .param VZCDP_UVP = 0.5
     .param NZCDPuvp = 3
 
-    BUvpEvt UVP_EVT GNDP V=if(V(GATE)<2.5 & V(RS_ACTIVE)<2.5 & V(ZCDP)<VZCDP_UVP, 5, 0)
+    BUvpEvt UVP_EVT GNDP V=if(V(GATE)<2.5 & V(RS_ACTIVE)<2.5 & V(ZCD_ATEDGE)<VZCDP_UVP, 5, 0)   ; plateau sample, not the valley ringing
 
     CUvpLatch UVP_LATCH GNDP 1n 
     BUvpSet GNDP UVP_LATCH I=if(V(UVP_EVT)>2.5, 10m*limit((4.6-V(UVP_LATCH))/0.2,0,1), 0)
@@ -389,7 +393,7 @@
     .param VEA_maxclamp = 2.3
 
     BFBStartOk FB_OK GNDS V=if(V(FB)>VFBStart, 5, 0)
-    BEAgm GNDS EA I=if(V(FB)<VFBref & V(EA)<VEA_maxclamp, Gm_EA*(VFBref-V(FB)), if(V(FB)>VFBref & V(EA)>0.01, Gm_EA*(VFBref-V(FB)), 0))
+    BEAgm GNDS EA I=Gm_EA*(VFBref-V(FB))*if(V(FB)<VFBref, limit((VEA_maxclamp-V(EA))/10m,0,1), limit(V(EA)/10m,0,1))   ; smooth 10 mV clamps: a hard if() clamp chattered at 2.3 V and stalled the time step
 
 * ==== Open-loop protection ====
     .param VEA_OLP = 2.3
@@ -397,7 +401,7 @@
     .param R_EAOLPB = 28.86Meg
     .param C_EAOLPB = 1n
 
-    BEaOlpRaw EA_OLP_RAW GNDS V=if(V(EA)>VEA_OLP, 5, 0)
+    BEaOlpRaw EA_OLP_RAW GNDS V=if(V(EA)>VEA_OLP-1m, 5, 0)   ; ASSUMPTION: 1 mV below the smooth EA clamp, which EA only approaches
     R_eaolpb EA_OLP_RAW EA_OLP_FILT {R_EAOLPB}
     C_eaolpb EA_OLP_FILT GNDS {C_EAOLPB}
     BEaOlpOut EA_OLP_FAULT GNDS V=if(V(EA_OLP_FILT)>2.5, 5, 0)
@@ -421,7 +425,7 @@
 
     CSrMem SR_MEM GNDS 1n
     BSrSet GNDS SR_MEM I=if(V(SR_ON_PULSE)>2.5, 50m*limit((4.6-V(SR_MEM))/0.2,0,1), 0)
-    BSrRst GNDS SR_MEM I=if((V(SR_OFF_PULSE)>2.5 | V(ML_PULSE)>2.5), -50m*limit((V(SR_MEM)-0.05+0.03)/0.06,0,1), 0)
+    BSrRst GNDS SR_MEM I=if((V(SR_OFF_PULSE)>2.5 | V(ML_PULSE)>2.5 | (V(SR_OFF_RAW)>2.5 & V(GDSR_MIN_ACTIVE)<2.5 & V(SR_ON_PULSE)<2.5)), -50m*limit((V(SR_MEM)-0.05+0.03)/0.06,0,1), 0)   ; level reset after tGDSR min: SR_OFF edge is missed if ZCDS never went below -4 mV
 
     .model SRSW SW(Ron=1 Roff=1Meg Vt=2.5 Vh=0.5)
     Vdig_sr SR_DIGSRC GNDS 5 
@@ -448,6 +452,10 @@
     Vdig_gdsr GDSR_DIGSRC GNDS {VGDSRclmp}
     Rpd_gdsr GDSR GNDS 1k
     S_gdsr GDSR GDSR_DIGSRC GDSR_ON_EXT GNDS GDSRSW
+    * Active sink: without it GDSR turned off only through Rpd_gdsr (1k x 6 nF board Cgs = 6 us), so the SR stayed on
+    * for ~8 us after every pulse and pulled current back out of the output.
+    .model GDSRSWLO SW(Ron=1 Roff=1Meg Vt=-2.5 Vh=0.5)   ; ASSUMPTION: 1 ohm sink; on when GDSR_ON_EXT < 2 V, off above 3 V
+    S_gdsr_lo GDSR GNDS GNDS GDSR_ON_EXT GDSRSWLO
 
 * ==== CONF0/CONF1 configuration decode ====
     .param ICONFx = 50u   
