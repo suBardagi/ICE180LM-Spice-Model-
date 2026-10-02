@@ -45,24 +45,40 @@ official Infineon datasheet.
 
 2. PINS (subcircuit order = symbol SpiceOrder)
 ----------------------------------------------
-  #  Pin    Domain     Function / typical connection (EVAL_100W1_ZVS_180LM)
-  1  DRAIN  primary    Internal power switch drain (CoolSiC, 83 mohm typ, Coer 60 pF)
-  2  HV     primary    Startup cell / brown-in sensing, via RHV to the DC bus (R3+R4 = 2 x 50 k = 100 k)
-  3  VCCP   primary    Primary supply. Startup cell charges it; aux winding + regulator hold it afterwards
-  4  GNDP   primary    Primary ground
-  5  ZCDP   primary    Aux-winding divider (RZCDPH 22 k to the aux diode, RZCDPL = 2 k to GNDP, 33 pF).
+  Pin  /  Domain  /   Function / typical connection (EVAL_100W1_ZVS_180LM)
+  
+  1 / DRAIN / primary  /  Internal power switch drain (CoolSiC, 83 mohm typ, Coer 60 pF)
+  
+  2 / HV   /  primary  /  Startup cell / brown-in sensing, via RHV to the DC bus (R3+R4 = 2 x 50 k = 100 k)
+  
+  3 / VCCP  / primary  /  Primary supply. Startup cell charges it; aux winding + regulator hold it afterwards
+  
+  4 / GNDP  / primary  /  Primary ground
+  
+  5 / ZCDP  / primary  /  Aux-winding divider (RZCDPH 22 k to the aux diode, RZCDPL = 2 k to GNDP, 33 pF).
                        RZCDPL also selects the brown-in/brown-out option (section 3)
-  6  VINP   primary    Bus-voltage sense for line OVP (divider from the DC bus through the ENP-controlled switch)
-  7  ENP    primary    Output that switches the VINP divider (10 V when enabled, 0 V when off)
-  8  CS     primary    Switch source / current sense: sense resistor (0.165 ohm on the eval board) to GNDP
-  9  GNDS   secondary  Secondary ground
- 10  GDSR   secondary  SR MOSFET gate drive (10 V)
- 11  ZCDS   secondary  SR drain sensing through a resistor (15 k for NMAIN/NSEC = 8)
- 12  VCCS   secondary  Secondary supply (from the output voltage)
- 13  FB     secondary  Feedback input, reference 1.2 V
- 14  EA     secondary  Error-amplifier output; external compensation network to GNDS
- 15  CONF0  secondary  RSET0 to GNDS: transformer turns ratio NMAIN/NSEC
- 16  CONF1  secondary  RSET1 to GNDS: hysteretic-mode parameter set
+  
+  6 / VINP  / primary  /  Bus-voltage sense for line OVP (divider from the DC bus through the ENP-controlled switch)
+  
+  7 / ENP  /  primary  /  Output that switches the VINP divider (10 V when enabled, 0 V when off)
+  
+  8 / CS   /  primary  /  Switch source / current sense: sense resistor (0.165 ohm on the eval board) to GNDP
+  
+  9 / GNDS /  secondary / Secondary ground
+ 
+ 10 / GDSR  / secondary / SR MOSFET gate drive (10 V)
+ 
+ 11 / ZCDS  / secondary / SR drain sensing through a resistor (15 k for NMAIN/NSEC = 8)
+ 
+ 12 / VCCS  / secondary / Secondary supply (from the output voltage)
+ 
+ 13 / FB   /  secondary / Feedback input, reference 1.2 V
+ 
+ 14 / EA   /  secondary / Error-amplifier output; external compensation network to GNDS
+ 
+ 15 / CONF0 / secondary / RSET0 to GNDS: transformer turns ratio NMAIN/NSEC
+ 
+ 16 / CONF1 / secondary / RSET1 to GNDS: hysteretic-mode parameter set
 
 Model-internal signals (gate, latches, counters) are not pins. When you need to look at them, run the
 netlist flat (see section 6) or probe them as X1:name in LTspice.
