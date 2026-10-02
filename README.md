@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/badge/version-0.1-white)
+![Version](https://img.shields.io/badge/version-0.2-white)
 [![License](https://img.shields.io/badge/license-Apache--2.0-red.svg)](LICENSE)
 ![Status](https://img.shields.io/badge/status-needs--validation-blue)
 
