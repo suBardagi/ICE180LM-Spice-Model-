@@ -497,7 +497,14 @@
     .param tho = 100u
     .param R_tho = 144.3k
     .param C_tho = 1n
-    BSecReady SEC_READY GNDS V=if(V(EN_VCCS)>2.5 & V(FB_OK)>2.5, 5, 0)
+    * Take-over latch: FB_OK (VFB>VFBstart) is only the START condition of the handoff (sec 3.3.6.1 p.11). Once requested,
+    * the take-over holds until VCCS UVLO (EN_VCCS low). ASSUMPTION (datasheet silent on whether FB is re-checked): with a
+    * level-based FB_OK the output drooped below VFBstart during the tho stop window under load, the request dropped, the
+    * primary resumed, and Vout limit-cycled at VFBstart/VFBref of nominal (found on the 750811330 board, 2026-10-02).
+    CSecToMem SEC_TO_MEM GNDS 1n
+    BSecToSet GNDS SEC_TO_MEM I=if(V(EN_VCCS)>2.5 & V(FB_OK)>2.5, 50m*limit((4.6-V(SEC_TO_MEM))/0.2,0,1), 0)
+    BSecToRst GNDS SEC_TO_MEM I=if(V(EN_VCCS)<2.5, -50m*limit((V(SEC_TO_MEM)-0.05+0.03)/0.06,0,1), 0)
+    BSecReady SEC_READY GNDS V=if(V(EN_VCCS)>2.5 & V(SEC_TO_MEM)>2.5, 5, 0)
 
     BSecTakeoverReq SEC_TAKEOVER_REQ GNDS V=if(V(SEC_READY)>2.5, 5, 0)
 
@@ -525,6 +532,26 @@
     BTargetHM GNDS TARGET_VALLEY I=if(V(HM_ACTIVE)>2.5 & V(EA)<VEA_R & V(TARGET_VALLEY)<V(NVALLEY_MAX), 10m, 0)   ; fixed at max in HM, stays there on exit (p.14)
     BTargetJump GNDS TARGET_VALLEY I=if(V(EA)>VEA_R & V(TARGET_VALLEY)>V(NVALLEY_MIN), -50m, 0)
     
+* ==== QR control: ZCDS peak detection (valley-counter events) ====
+    * Datasheet sec 3.3.7.1 p.13: with ZVS disabled the valley counter steps on every secondary-side PEAK (= primary drain
+    * valley); with ZVS enabled (IZCDS > IZCDS_mid) on every secondary valley, after which the ZVS pulse swings the drain low.
+    * The ZVS current-injection pulse is not modelled, so peaks are counted at all lines: turn-on then lands in the drain
+    * valley, which is where the real ZVS sequence also places it. (Counting SR_ON_PULSE, as before, counted the demag
+    * start as valley 1 and turned the primary on at a drain peak.)
+    * Peak = ZCDS in the upper half of the ringing (> VCCS + VPK_above) with the slope just turned negative (< -VPK_slope/tau).
+    * Blocked while the secondary on-time window (ZCDS clamp) is active. ASSUMPTIONS: 10 ns slope filter, 0.3 V / 1 V/us
+    * thresholds; the 200 ns event pulse needs a quarter ringing period > ~200 ns (tDCM > ~800 ns; datasheet allows 600 ns).
+    .param VPK_above = 0.3
+    .param VPK_slope = 10m
+    BPkBuf ZCDS_BUF GNDS V=V(ZCDS)
+    Rpkf ZCDS_BUF ZCDS_LP 1k
+    Cpkf ZCDS_LP GNDS 10p
+    BPkRaw PK_RAW GNDS V=if(V(TON_ACTIVE)<2.5 & V(ZCDS)>V(VCCS)+VPK_above & V(ZCDS_BUF)-V(ZCDS_LP)<-VPK_slope, 5, 0)
+    Rpk PK_RAW PK_RC {R_srpulse}
+    Cpk PK_RC GNDS {C_srpulse}
+    Spk PK_RC GNDS GNDS PK_RAW LEBRESET
+    BValleyEvt VALLEY_EVT GNDS V=if(V(PK_RAW)>2.5 & V(PK_RC)<2.5, 5, 0)
+
 * ==== QR control: frequency limits (fsw_min floor, fsw_max ceiling) ====
     .param fsw_min = 25k     
     .param tSwMax = 40u      
@@ -554,7 +581,7 @@
 
 * ==== QR control: valley counting ====
     CValleyCnt VALLEY_CNT GNDS 1n
-    BValleyCntStep GNDS VALLEY_CNT I=if(V(SR_ON_PULSE)>2.5, 5m*limit((20.25-V(VALLEY_CNT))/0.5,0,1), 0)
+    BValleyCntStep GNDS VALLEY_CNT I=if(V(VALLEY_EVT)>2.5, 5m*limit((20.25-V(VALLEY_CNT))/0.5,0,1), 0)
     BValleyMatch VALLEY_MATCH GNDS V=if(V(VALLEY_CNT)>V(TARGET_VALLEY)-0.5 & V(VALLEY_CNT)<V(TARGET_VALLEY)+0.5, 5, 0)
     CMatchLatch MATCH_LATCH GNDS 1n
     BMatchLatchSet GNDS MATCH_LATCH I=if((V(VALLEY_MATCH)>2.5 | V(FSW_MIN_TIMEOUT)>2.5 | V(CCM_TIMEOUT)>2.5) & (V(FSWMAX_ACTIVE)<2.5 | V(MATCH_LATCH)>0.3), 500m*limit((4.6-V(MATCH_LATCH))/0.2,0,1), 0)
@@ -586,7 +613,21 @@
     .model ZCLMPSW SW(Ron=10 Roff=1G Vt=2.5 Vh=0.5)
     Sclamp ZCDS VCCS TON_ACTIVE GNDS ZCLMPSW
     CIffHold IFF_HOLD GNDS 1n
-    BIffTrack GNDS IFF_HOLD I=if(V(TON_ACTIVE)>2.5, 100m*(-1000*I(Sclamp)-V(IFF_HOLD)), 0)   ; LTspice reports switch current with negative sign here; 1 V = 1 mA; tracks in pulse, holds after
+    * LTspice reports the switch current with negative sign here; 1 V = 1 mA. Tracks only forward clamp current (primary on):
+    * up fast (tau 10 ns), down slow (tau 500 ns) so the ~20 ns SRD fall at primary turn-off does not drag the held value down.
+    BIffTrack GNDS IFF_HOLD I=if(V(TON_ACTIVE)>2.5 & -1000*I(Sclamp)>0, if(-1000*I(Sclamp)>V(IFF_HOLD), 100m, 2m)*(-1000*I(Sclamp)-V(IFF_HOLD)), 0)
+    * ----- Primary turn-off detection: clamp current reverses (SRD falls below VCCS at demag start) -----
+    * Ends the secondary's on-time window when the primary stops early (OCP1, tOnMax), so the clamp releases ZCDS for SR
+    * turn-on and valley sensing. Without it the clamp held ZCDS at VCCS for the whole requested on-time (up to 35 us),
+    * the SR never turned on, no valleys were seen and the converter fell back to 40 us forced cycles.
+    * ASSUMPTION: 250 ns blanking (covers CT-Link delay + primary turn-on), 0.1 mA reverse-current threshold.
+    .param tPRIOFF_blank = 250n
+    BPriOffDet PRI_OFF_DET GNDS V=if(V(TON_ACTIVE)>2.5 & V(TON_RAMP)>Kton*tPRIOFF_blank & -1000*I(Sclamp)<-0.1, 5, 0)
+    * Latched until TON_MEM is empty: PRI_OFF_DET itself drops as soon as TON_ACTIVE (and the clamp) turn off at TON_MEM ~2 V,
+    * which left TON_MEM stuck half-full, the ramp never cleared (Stonempty needs < 0.1 V) and the next pulse ended after ~2 us.
+    CPriOffMem PRI_OFF_MEM GNDS 1n
+    BPriOffSet GNDS PRI_OFF_MEM I=if(V(PRI_OFF_DET)>2.5, 100m*limit((4.6-V(PRI_OFF_MEM))/0.2,0,1), 0)
+    BPriOffRst GNDS PRI_OFF_MEM I=if(V(TON_MEM)<0.05, -50m*limit((V(PRI_OFF_MEM)-0.05+0.03)/0.06,0,1), 0)
 
     * ----- On-time target: ramp threshold = Kton * ton(EA, IZCDS) -----
     BEaEff EA_EFF GNDS V=if(V(HM_ACTIVE)>2.5, VEA_PWM_HM, V(EA))   ; hysteretic mode pulses use a fixed EA level (p.14)
@@ -595,7 +636,7 @@
     * ----- Pulse latch: set by the ON request, reset when the ramp passes the target (persists until empty) -----
     CTonMem TON_MEM GNDS 1n
     BTonSet GNDS TON_MEM I=if(V(CT_TX_ON,GNDS)>2.5, 100m*limit((4.6-V(TON_MEM))/0.2,0,1), 0)
-    BTonRst GNDS TON_MEM I=if((V(TON_TRIP)>2.5 | V(SEC_CLOSED_LOOP)<2.5), -20m*limit((V(TON_MEM)-0.01+0.03)/0.06,0,1), 0)
+    BTonRst GNDS TON_MEM I=if((V(TON_TRIP)>2.5 | V(PRI_OFF_MEM)>2.5 | V(SEC_CLOSED_LOOP)<2.5), -20m*limit((V(TON_MEM)-0.01+0.03)/0.06,0,1), 0)
     .model TONSW SW(Ron=1 Roff=1Meg Vt=2.5 Vh=0.5)
     Vdig_ton TON_DIGSRC GNDS 5
     Rpd_ton TON_ACTIVE GNDS 1k
@@ -707,6 +748,8 @@
     Rdc_iff_hold IFF_HOLD GNDS 100G
     Rdc_ln_mem LN_MEM GNDS 100G
     Rdc_sr_mem SR_MEM GNDS 100G
+    Rdc_sec_to_mem SEC_TO_MEM GNDS 100G
+    Rdc_pri_off_mem PRI_OFF_MEM GNDS 100G
     Rdc_swmax_rc SWMAX_RC GNDS 100G
     Rdc_target_valley TARGET_VALLEY GNDS 100G
     Rdc_ton_mem TON_MEM GNDS 100G
